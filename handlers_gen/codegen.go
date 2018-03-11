@@ -10,50 +10,85 @@ import (
 	"go/token"
 	"log"
 	"os"
-	"reflect"
+	//	"reflect"
 	"strings"
 	"text/template"
 )
 
 //-----------------------------------------------------------------------------
 type (
-	tpl1 struct { // ParamField
-		StructTypeName string
-		FieldName      string
-		JsonName       string
-		MustSign       string
-		Value          int
-		EnumStr        []string
-		EnumInt        []int //TODO ???
-		DefaultStr     string
-		DefaultInt     int //TODO ???
-	}
-
 	funcData struct {
-		agMRecvType   string //agMethodReceiverTypeName
+		agMRecvType   string //agMethodReceiverType
 		agFName       string //agFuncName
-		agParamsType  string //agParamsTypeName
-		agMResultType string //agMethodResultTypeName
-		agData        ApigenFuncData
+		agParamsType  string //agParamsType
+		agMResultType string //agMethodResultType
+		agMetaData    ApigenFuncMetaData
 	}
 
-	tpl2 struct { // serveHTTP
-		agMRecvType  string //api struct
-		agMRecvFuncs []funcData
-	}
-
-	ApigenFuncData struct {
+	ApigenFuncMetaData struct {
 		Url    string `json:"url"`
 		Auth   bool   `json:"auth"`
 		Method string `json:"method"`
 	}
 
-	tpls2 map[string]tpl2 //map[Recv]tpl2
+	//TODO ??? RestrictionEnumInt, RestrictionDefaultInt
+
+	RestrictionMin *struct {
+		Value int
+	}
+	RestrictionMax *struct {
+		Value int
+	}
+	RestrictionEnumStr *struct { // !struct, just slice(string) ???
+		Value []string
+	}
+	RestrictionLenStr *struct {
+		Value int
+	}
+	RestrictionDefaultStr *struct {
+		Value string
+	}
+
+	// template	for param validation
+	tplStruct1 struct { // ParamField
+		StructType      string
+		FieldName       string
+		JsonName        string
+		FieldType       string //TODO ??? enum
+		RestrMinInt     RestrictionMin
+		RestrMaxInt     RestrictionMax
+		RestrEnumStr    RestrictionEnumStr
+		RestrLenStr     RestrictionLenStr
+		RestrDefaultStr RestrictionDefaultStr
+	}
+
+	// templates for SmthParams
+	tplStructs1 map[string]*tplStruct1 //map[paramsStuctType]paramsStuctField
+
+	// template for (wrapperSmth func || serveHTTP.switch_case)
+	tplStruct2 struct { // serveHTTP
+		agMRecvType  string //api struct
+		agMRecvFuncs []funcData
+	}
+
+	// templates for (func (h Smth) wrapper... || func (h Smth) serveHTTP)
+	tplStructs2 map[string]*tplStruct2 //map[Recv]tpl2
+
 )
+
+//func (s *tplStruct1) set(ss tplStruct1) {
+//	s = ss
+//}
+
+func (s *tplStruct2) appendFunc(fd funcData) {
+	s.agMRecvFuncs = append(s.agMRecvFuncs, fd)
+}
 
 //-----------------------------------------------------------------------------
 const (
-	apigenPrefix = "// apigen:api"
+	apigenPrefix       = "// apigen:api"
+	apivalidatorPrefix = "`apivalidator:"                                            //TODO ??? "`"
+	inFName            = "/home/vit/programs/coursera-mail.ru-go/hw5_codegen/api.go" //TODO REMOVE DEBUG
 )
 
 //-----------------------------------------------------------------------------
@@ -74,7 +109,7 @@ var (
 `))
 
 	avStrRequiredTpl = template.Must(template.New("avStrRequiredTpl").Parse(`
-	// paramsValidateStrRequired_{{.StructTypeName}}.{{.FieldName}}
+	// paramsValidateStrRequired_{{.StructType}}.{{.FieldName}}
 	if params.{{.FieldName}} == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must me not empty\"}")
@@ -82,7 +117,7 @@ var (
 	}
 `))
 	avStrMinLenTpl = template.Must(template.New("avStrMinLenTpl").Parse(`
-	// paramsValidateStrMinLen_{{.StructTypeName}}.{{.FieldName}}
+	// paramsValidateStrMinLen_{{.StructType}}.{{.FieldName}}
 	if !len(params.{{.FieldName}}) >= {{.Value}} {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} len must be >= {{.Value}}\"}")
@@ -91,7 +126,7 @@ var (
 `))
 	avStrEnumTpl = template.Must(template.New("avStrEnumTpl").Funcs(template.FuncMap{
 		"join": strings.Join}).Parse(`
-	// paramsValidateStrEnum_{{.StructTypeName}}.{{.FieldName}}
+	// paramsValidateStrEnum_{{.StructType}}.{{.FieldName}}
 	switch params.{{.FieldName}} {
 	case "{{join .EnumStr "\", \""}}": //do nothing
 	case "":
@@ -103,7 +138,7 @@ var (
 	}
 `))
 	avIntMinMaxTpl = template.Must(template.New("avIntMinMaxTpl").Parse(`
-	// paramsValidateIntMinMax_{{.StructTypeName}}.{{.FieldName}}
+	// paramsValidateIntMinMax_{{.StructType}}.{{.FieldName}}
 	if !params.{{.FieldName}} {{.MustSign}} {{.Value}} {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must be {{.MustSign}} {{.Value}}\"}")
@@ -122,19 +157,25 @@ func (h {{.agMRecvType}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "{\"error\":\"unknown method\"}")
 	}
 `))
+
+	theTplStructs2 tplStructs2
+	theTplStructs1 tplStructs1
 )
 
-//-----------------------------------------------------------------------------
+//==============================================================================
+//==============================================================================
 func main() {
-	tmpStructs := make(tmpStructStorage) //TODO ot //for structs to process later
+	theTplStructs2 = make(tplStructs2)
 
 	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, os.Args[1], nil, parser.ParseComments)
+	//node, err := parser.ParseFile(fset, os.Args[1], nil, parser.ParseComments) //TODO UNCOMMENT DEBUG
+	node, err := parser.ParseFile(fset, inFName, nil, parser.ParseComments) //TODO REMOVE DEBUG
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	out, _ := os.Create(os.Args[2])
+	//out, _ := os.Create(os.Args[2]) //TODO UNCOMMENT DEBUG
+	out := os.Stdout //TODO REMOVE DEBUG
 
 	fmt.Fprintln(out, `package `+node.Name.Name)
 	fmt.Fprintln(out) // empty line
@@ -144,69 +185,11 @@ func main() {
 	fmt.Fprintln(out, `import "strconv"`)
 	fmt.Fprintln(out) // empty line
 
+	//==========================================================================
+	// Parsing input ===========================================================
 ROOT_NODE_DECLS:
 	for _, f := range node.Decls {
 		switch d := f.(type) {
-		//======================================================================
-		/*
-			case *ast.GenDecl:
-				fmt.Println("== GenDecl:", d)
-
-				//SPECS_LOOP:
-				for _, spec := range d.Specs {
-					currType, ok := spec.(*ast.TypeSpec)
-					if !ok {
-						fmt.Printf("SKIP %T is not ast.TypeSpec\n", spec)
-						continue
-					}
-
-					currStruct, ok := currType.Type.(*ast.StructType)
-					if !ok {
-						fmt.Printf("SKIP %T is not ast.StructType\n", currStruct)
-						continue
-					}
-
-					tmpStructName := currType.Name.Name
-					fmt.Printf("process struct %s\n", tmpStructName)
-					fmt.Printf("\tgenerating auxiliary data structures from struct definition\n")
-
-					//TODO
-					fmt.Println("TODO", tmpStructs)
-
-				FIELDS_LOOP:
-					for _, field := range currStruct.Fields.List {
-
-						if field.Tag != nil {
-							fmt.Println("==== struct field tag:", field.Tag.Value)
-							tag := reflect.StructTag(field.Tag.Value[1 : len(field.Tag.Value)-1])
-							tagStr := tag.Get("apivalidator")
-							if tagStr == "" {
-								continue FIELDS_LOOP
-							}
-							fmt.Println("==== tagStr:", tagStr)
-						}
-
-						fieldName := field.Names[0].Name
-						fileType := field.Type.(*ast.Ident).Name
-
-						fmt.Printf("\tgenerating code for field %s.%s\n", currType.Name.Name, fieldName)
-
-						switch fileType {
-						case "int":
-							intFillTpl.Execute(out, tpl{fieldName})
-						case "string":
-							strFillTpl.Execute(out, tpl{fieldName})
-						default:
-							log.Fatalln("unsupported", fileType)
-						}
-					}
-
-					fmt.Fprintln(out) // empty line
-
-				}
-
-		*/
-		//======================================================================
 		case *ast.FuncDecl:
 			if d.Doc == nil {
 				fmt.Printf("SKIP func %#v doesnt have comments\n", d.Name.Name)
@@ -214,7 +197,7 @@ ROOT_NODE_DECLS:
 			}
 
 			// Searching apigen tag of the func //struct method
-			agFuncData := ApigenFuncData{}
+			agFuncData := ApigenFuncMetaData{}
 			needCodegen := false
 			for _, comment := range d.Doc.List {
 				if strings.HasPrefix(comment.Text, apigenPrefix) { //TODO ??? Presuming only_one OR none apigenPrefix (is it OK?)
@@ -241,7 +224,7 @@ ROOT_NODE_DECLS:
 			}
 			//if r.List == nil { continue ROOT_NODE_DECLS } //TODO ?
 			//for _, cc := range agr.List { //TODO ?
-			var agMRecvType string //++ agMethodReceiverTypeName
+			var agMRecvType string //++ agMethodReceiverType
 			star, ok := r.List[0].Type.(*ast.StarExpr)
 			if ok {
 				i, _ := star.X.(*ast.Ident) //TODO !ok ?
@@ -263,11 +246,11 @@ ROOT_NODE_DECLS:
 			n := s.Names[0]
 			f, _ := n.Obj.Decl.(*ast.Field) //TODO !ok ?
 			t, _ := f.Type.(*ast.Ident)     //TODO !ok ?
-			agParamsType := t.Name          //++ agParamsTypeName
+			agParamsType := t.Name          //++ agParamsType
 			fmt.Println("=== agParamsType ===", agParamsType)
 
 			// Method Results ==================================================
-			var agMResultType string                                 //++ agMethodResultTypeName
+			var agMResultType string                                 //++ agMethodResultType
 			star2, ok := d.Type.Results.List[0].Type.(*ast.StarExpr) //TODO ??? ###PRESUME### we need 1st result
 			if ok {
 				i, _ := star2.X.(*ast.Ident) //TODO !ok ?
@@ -278,14 +261,56 @@ ROOT_NODE_DECLS:
 			}
 			fmt.Println("=== agMResultType ===", agMResultType)
 
+			// ADD method data to tmp_map[RecvStructType] ======================
+			if _, ok := theTplStructs2[agMRecvType]; !ok { //init map element of type tpl2
+				theTplStructs2[agMRecvType] = &tplStruct2{
+					agMRecvType:  agMRecvType, //struct_field: local_var
+					agMRecvFuncs: make([]funcData, 0, 1),
+				}
+			}
+			theTplStructs2[agMRecvType].appendFunc(funcData{
+				agMRecvType:   agMRecvType,
+				agFName:       agFName,
+				agParamsType:  agParamsType,
+				agMResultType: agMResultType,
+				agMetaData:    agFuncData,
+			})
+			fmt.Printf("+++ %#v\n", theTplStructs2[agMRecvType])
+
 			//==================================================================
 			//TODO Params -> go deeper
 			//==================================================================
+			//fmt.Printf("### %#v\n", t.Obj.Decl)
+			tt, _ := t.Obj.Decl.(*ast.TypeSpec)
+			//fmt.Printf("#### %#v\n", tt.Type)
+			ttt, _ := tt.Type.(*ast.StructType)
+
+		PARAM_FIELDS_LOOP:
+			for _, f := range ttt.Fields.List {
+				t, _ := f.Type.(*ast.Ident)        //TODO !ok ?
+				fmt.Printf("== %v\n", t.Name)      //++ paramType -> tpl<paramType>
+				fmt.Printf("== %v\n", f.Tag.Value) //++ paramValidatorMetaTags
+				if !strings.HasPrefix(f.Tag.Value, apivalidatorPrefix) {
+					fmt.Println("\tSKIP param_field with no apivalidator prefix")
+					continue PARAM_FIELDS_LOOP
+				}
+				for _, n := range f.Names {
+					fmt.Printf("=== %v\n", n.Name) //++ paramName
+				}
+			}
+			//			fmt.Printf("##### %#v\n", ttt)
+
+			fmt.Println(theTplStructs1) //TODO REMOVE DEBUG
+			os.Exit(0)
+			//##################################################################
 
 		default:
-			fmt.Println("SKIP %T is not ast.GenDecl or ast.FuncDecl\n", d)
+			fmt.Printf("SKIP %T is not ast.GenDecl or ast.FuncDecl\n", d)
 		}
-
-		fmt.Println("\n\n") //DEBUG
+		//fmt.Println("\n\n") //DEBUG
 	}
+
+	//==========================================================================
+	// Generating output =======================================================
+	//TODO ...
 }
