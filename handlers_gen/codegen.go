@@ -2,6 +2,10 @@ package main
 
 // код писать тут
 
+//TODO ? Местами код дублируется для удобства применения шаблона,
+// например, тип структуры:
+// map[StructType]struct{StructType...}
+
 import (
 	"encoding/json"
 	"fmt"
@@ -11,6 +15,8 @@ import (
 	"log"
 	"os"
 	//	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -33,37 +39,52 @@ type (
 
 	//TODO ??? RestrictionEnumInt, RestrictionDefaultInt
 
-	RestrictionMin *struct {
+	AVRequired struct {
+		Value bool
+	}
+	AVParamName struct {
+		Value string
+	}
+	AVRestrictionMin struct {
 		Value int
 	}
-	RestrictionMax *struct {
+	AVRestrictionMax struct {
 		Value int
 	}
-	RestrictionEnumStr *struct { // !struct, just slice(string) ???
+	AVRestrictionEnum struct { // !struct, just slice(string) because it can be nil too???
 		Value []string
 	}
-	RestrictionLenStr *struct {
-		Value int
-	}
-	RestrictionDefaultStr *struct {
+	AVRestrictionDefault struct {
 		Value string
+	}
+	//	AVRestrictionLenStr struct {
+	//		Value int
+	//	}
+
+	// Data from `apivalidator:...` meta tag
+	// At this point it's no matter of which type param is
+	ApiValidatorMeta struct {
+		Required     *AVRequired
+		ParamName    *AVParamName
+		RestrMin     *AVRestrictionMin //~RestrMinLenStr
+		RestrMax     *AVRestrictionMax
+		RestrEnum    *AVRestrictionEnum
+		RestrDefault *AVRestrictionDefault
+		//RestrMinLenStr  AVRestrictionLenStr
 	}
 
 	// template	for param validation
+	//TODO rename avParamTplStruct ?
+	//TODO Restr<...> --> []Restriction; type Restriction interface{ Parse(), Generate() }
 	tplStruct1 struct { // ParamField
-		StructType      string
-		FieldName       string
-		JsonName        string
-		FieldType       string //TODO ??? enum
-		RestrMinInt     RestrictionMin
-		RestrMaxInt     RestrictionMax
-		RestrEnumStr    RestrictionEnumStr
-		RestrLenStr     RestrictionLenStr
-		RestrDefaultStr RestrictionDefaultStr
+		StructType string
+		FieldName  string
+		FieldType  string //TODO ??? enum
+		ApiValidatorMeta
 	}
 
 	// templates for SmthParams
-	tplStructs1 map[string]*tplStruct1 //map[paramsStuctType]paramsStuctField
+	tplStructs1 map[string][]tplStruct1 //map[paramsStructType][]paramsStructField
 
 	// template for (wrapperSmth func || serveHTTP.switch_case)
 	tplStruct2 struct { // serveHTTP
@@ -76,6 +97,53 @@ type (
 
 )
 
+//-----------------------------------------------------------------------------
+//TODO ??? empty values (for example, "default=,") - how to process
+func PopApiValidatorValue(s0 string, re *regexp.Regexp) (s, ss string) { //TODO ? (.., error)
+	// dirty hack:
+	if !strings.HasPrefix(s0, ",") {
+		s0 = "," + s0
+	}
+	if !strings.HasSuffix(s0, ",") {
+		s0 = s0 + ","
+	}
+
+	i := re.FindStringSubmatchIndex(s0) //[] OR [x0, x1, y0, y1]
+	if len(i) < 4 {                     //==0 ?
+		return s0, "" // no value
+	}
+	s = s0[:i[0]+1] + s0[i[1]:]
+	ss = s0[i[2]:i[3]]
+	return
+}
+
+func (m *ApiValidatorMeta) ParseAVMetaTags(s string) {
+	s, required := PopApiValidatorValue(s, reRequred)
+	if required == "required" {
+		m.Required = &AVRequired{true}
+	}
+	s, paramname := PopApiValidatorValue(s, reParamname)
+	if paramname != "" {
+		m.ParamName = &AVParamName{paramname}
+	}
+	s, minS := PopApiValidatorValue(s, reMin)
+	if min, err := strconv.Atoi(minS); err == nil {
+		m.RestrMin = &AVRestrictionMin{min}
+	}
+	s, maxS := PopApiValidatorValue(s, reMax)
+	if max, err := strconv.Atoi(maxS); err == nil {
+		m.RestrMax = &AVRestrictionMax{max}
+	}
+	s, enum := PopApiValidatorValue(s, reEnum)
+	if enum != "" {
+		m.RestrEnum = &AVRestrictionEnum{strings.Split(enum, "|")}
+	}
+	s, def := PopApiValidatorValue(s, reDefault)
+	if def != "" {
+		m.RestrDefault = &AVRestrictionDefault{def}
+	}
+}
+
 //func (s *tplStruct1) set(ss tplStruct1) {
 //	s = ss
 //}
@@ -87,12 +155,23 @@ func (s *tplStruct2) appendFunc(fd funcData) {
 //-----------------------------------------------------------------------------
 const (
 	apigenPrefix       = "// apigen:api"
-	apivalidatorPrefix = "`apivalidator:"                                            //TODO ??? "`"
+	apivalidatorPrefix = "`apivalidator:\"" //TODO \" ???
+	apivalidatorSuffix = "\"`"
 	inFName            = "/home/vit/programs/coursera-mail.ru-go/hw5_codegen/api.go" //TODO REMOVE DEBUG
 )
 
 //-----------------------------------------------------------------------------
 var (
+	//TODO ??? We will be using simpler regular expressions,
+	// but then we have to add "," at the beginning and at the end of string to match against:
+	// "`apivalidator:paramname=a,required,min=5`" -> "paramname=a,required,min=5" -> ",paramname=a,required,min=5,"
+	reRequred   = regexp.MustCompile(",(required),")
+	reParamname = regexp.MustCompile(",paramname=([^,]*)")
+	reEnum      = regexp.MustCompile(",enum=([^,]*)") //TODO strings.Split(..,"|")
+	reDefault   = regexp.MustCompile(",default=([^,]*)")
+	reMin       = regexp.MustCompile(",min=([^,]*)")
+	reMax       = regexp.MustCompile(",max=([^,]*)")
+
 	strFillTpl = template.Must(template.New("strFillTpl").Parse(`
 	// paramsFillString_{{.FieldName}}
 	params.{{.FieldName}} = r.FormValue("{{.JsonName}}")
@@ -158,13 +237,14 @@ func (h {{.agMRecvType}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 `))
 
-	theTplStructs2 tplStructs2
 	theTplStructs1 tplStructs1
+	theTplStructs2 tplStructs2
 )
 
 //==============================================================================
 //==============================================================================
 func main() {
+	theTplStructs1 = make(tplStructs1)
 	theTplStructs2 = make(tplStructs2)
 
 	fset := token.NewFileSet()
@@ -287,21 +367,39 @@ ROOT_NODE_DECLS:
 
 		PARAM_FIELDS_LOOP:
 			for _, f := range ttt.Fields.List {
-				t, _ := f.Type.(*ast.Ident)        //TODO !ok ?
-				fmt.Printf("== %v\n", t.Name)      //++ paramType -> tpl<paramType>
-				fmt.Printf("== %v\n", f.Tag.Value) //++ paramValidatorMetaTags
+				t, _ := f.Type.(*ast.Ident) //TODO !ok ?
+				//fmt.Printf("=type= %v\n", t.Name)
+				//fmt.Printf("=tags= %v\n", f.Tag.Value)
 				if !strings.HasPrefix(f.Tag.Value, apivalidatorPrefix) {
 					fmt.Println("\tSKIP param_field with no apivalidator prefix")
 					continue PARAM_FIELDS_LOOP
 				}
+				agFType := t.Name //++ paramType -> tpl<paramType>
+				agFMetaTags := strings.TrimPrefix(f.Tag.Value, apivalidatorPrefix)
+				agFMetaTags = strings.TrimSuffix(agFMetaTags, apivalidatorSuffix) //++ paramValidatorMetaTags
+
+				// Parsing apivalidator meta tags:
+				agFMeta := ApiValidatorMeta{}
+				agFMeta.ParseAVMetaTags(agFMetaTags)
 				for _, n := range f.Names {
 					fmt.Printf("=== %v\n", n.Name) //++ paramName
+					if _, ok := theTplStructs1[agParamsType]; !ok {
+						theTplStructs1[agParamsType] = make([]tplStruct1, 0) //init
+					}
+					if agFMeta.ParamName == nil { //JsonName
+						agFMeta.ParamName = &AVParamName{strings.ToLower(agFName)}
+					}
+					theTplStructs1[agParamsType] = append(theTplStructs1[agParamsType], tplStruct1{
+						StructType:       agParamsType,
+						FieldName:        agFName,
+						FieldType:        agFType,
+						ApiValidatorMeta: agFMeta,
+					})
 				}
 			}
-			//			fmt.Printf("##### %#v\n", ttt)
-
+			fmt.Printf("##### %#v\n", theTplStructs1[agParamsType])
 			fmt.Println(theTplStructs1) //TODO REMOVE DEBUG
-			os.Exit(0)
+			//os.Exit(0)
 			//##################################################################
 
 		default:
