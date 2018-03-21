@@ -6,6 +6,9 @@ package main
 // например, тип структуры:
 // map[StructType]struct{StructType...}
 
+//TODO DefaultStr, DefaultInt:
+// пока используются только в Enum_restriction
+
 import (
 	"encoding/json"
 	"fmt"
@@ -14,7 +17,8 @@ import (
 	"go/token"
 	"log"
 	"os"
-	//	"reflect"
+	//	"reflect" //for reflect.StructTag
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,12 +27,12 @@ import (
 
 //-----------------------------------------------------------------------------
 type (
-	funcData struct {
-		agMRecvType   string //agMethodReceiverType
-		agFName       string //agFuncName
-		agParamsType  string //agParamsType
-		agMResultType string //agMethodResultType
-		agMetaData    ApigenFuncMetaData
+	FuncData struct {
+		AGMRecvType   string //agMethodReceiverType
+		AGFName       string //agFuncName
+		AGParamsType  string //agParamsType
+		AGMResultType string //agMethodResultType
+		AGMetaData    ApigenFuncMetaData
 	}
 
 	ApigenFuncMetaData struct {
@@ -88,8 +92,8 @@ type (
 
 	// template for (wrapperSmth func || serveHTTP.switch_case)
 	tplStruct2 struct { // serveHTTP
-		agMRecvType  string //api struct
-		agMRecvFuncs []funcData
+		AGMRecvType  string //api struct
+		AGMRecvFuncs []FuncData
 	}
 
 	// templates for (func (h Smth) wrapper... || func (h Smth) serveHTTP)
@@ -148,8 +152,8 @@ func (m *ApiValidatorMeta) ParseAVMetaTags(s string) {
 //	s = ss
 //}
 
-func (s *tplStruct2) appendFunc(fd funcData) {
-	s.agMRecvFuncs = append(s.agMRecvFuncs, fd)
+func (s *tplStruct2) appendFunc(fd FuncData) {
+	s.AGMRecvFuncs = append(s.AGMRecvFuncs, fd)
 }
 
 //-----------------------------------------------------------------------------
@@ -174,67 +178,114 @@ var (
 
 	strFillTpl = template.Must(template.New("strFillTpl").Parse(`
 	// paramsFillString_{{.FieldName}}
-	params.{{.FieldName}} = r.FormValue("{{.JsonName}}")
+	params.{{.FieldName}} = r.FormValue("{{.ParamName.Value}}")
 `))
 	intFillTpl = template.Must(template.New("intFillTpl").Parse(`
 	// paramsFillInt_{{.FieldName}}
-	if tmp, err := strconv.Atoi(r.FormValue("{{.JsonName}}")); err != nil {
+	if tmp, err := strconv.Atoi(r.FormValue("{{.ParamName.Value}}")); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must be int\"}")
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be int\"}")
 		return
 	} else {
 		params.{{.FieldName}} = tmp
 	}
 `))
 
+	//-= Restrictions: required =-
 	avStrRequiredTpl = template.Must(template.New("avStrRequiredTpl").Parse(`
 	// paramsValidateStrRequired_{{.StructType}}.{{.FieldName}}
 	if params.{{.FieldName}} == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must me not empty\"}")
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must me not empty\"}")
 		return
 	}
 `))
-	avStrMinLenTpl = template.Must(template.New("avStrMinLenTpl").Parse(`
-	// paramsValidateStrMinLen_{{.StructType}}.{{.FieldName}}
-	if !len(params.{{.FieldName}}) >= {{.Value}} {
+	//TODO: what is error_msg?
+	avIntRequiredTpl = template.Must(template.New("avIntRequiredTpl").Parse(`
+	// paramsValidateIntRequired_{{.StructType}}.{{.FieldName}}
+	if params.{{.FieldName}} == 0 {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} len must be >= {{.Value}}\"}")
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be not empty\"}")
 		return
-	}	
+	}
 `))
+
+	//=== Restrictions: enum ===
 	avStrEnumTpl = template.Must(template.New("avStrEnumTpl").Funcs(template.FuncMap{
 		"join": strings.Join}).Parse(`
 	// paramsValidateStrEnum_{{.StructType}}.{{.FieldName}}
 	switch params.{{.FieldName}} {
-	case "{{join .EnumStr "\", \""}}": //do nothing
-	case "":
-		params.{{.FieldName}} = "{{.DefaultStr}}"
+	case "{{join .RestrEnum.Value "\", \""}}": //do nothing
 	default:
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must be one of [{{join .EnumStr ", "}}]\"}")
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be one of [{{join .RestrEnum.Value ", "}}]\"}")
 		return
 	}
 `))
-	avIntMinMaxTpl = template.Must(template.New("avIntMinMaxTpl").Parse(`
-	// paramsValidateIntMinMax_{{.StructType}}.{{.FieldName}}
-	if !params.{{.FieldName}} {{.MustSign}} {{.Value}} {
+	avIntEnumTpl = template.Must(template.New("avIntEnumTpl").Funcs(template.FuncMap{
+		"join": strings.Join}).Parse(`
+	// paramsValidateIntEnum_{{.StructType}}.{{.FieldName}}
+	switch params.{{.FieldName}} {
+	case {{join .RestrEnum.Value ", "}}: //do nothing
+	default:
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintln(w, "{\"error\":\"{{.JsonName}} must be {{.MustSign}} {{.Value}}\"}")
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be one of [{{join .RestrEnum.Value ", "}}]\"}")
+		return
+	}
+`))
+
+	//=== Restrictions: default ===
+	avStrDefaultTpl = template.Must(template.New("avStrDefaultTpl").Parse(`
+	// paramsValidateIntDefault_{{.StructType}}.{{.FieldName}}
+	if params.{{.FieldName}} == "" {
+		params.{{.FieldName}} = "{{.RestrDefault.Value}}"
+	}
+`))
+	avIntDefaultTpl = template.Must(template.New("avIntDefaultTpl").Parse(`
+	// paramsValidateIntDefault_{{.StructType}}.{{.FieldName}}
+	if params.{{.FieldName}} == 0 {
+		params.{{.FieldName}} = {{.RestrDefault.Value}}
+	}
+`))
+
+	//=== Restrictions: min ===
+	avStrMinLenTpl = template.Must(template.New("avStrMinLenTpl").Parse(`
+	// paramsValidateStrMinLen_{{.StructType}}.{{.FieldName}}
+	if !len(params.{{.FieldName}}) >= {{.RestrMin.Value}} {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} len must be >= {{.RestrMin.Value}}\"}")
+		return
+	}	
+`))
+	avIntMinTpl = template.Must(template.New("avIntMinTpl").Parse(`
+	// paramsValidateIntMin_{{.StructType}}.{{.FieldName}}
+	if !params.{{.FieldName}} >= {{.RestrMin.Value}} {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be >= {{.RestrMin.Value}}\"}")
+		return
+	}
+`))
+	//=== Restrictions: max ===
+	avIntMaxTpl = template.Must(template.New("avIntMaxTpl").Parse(`
+	// paramsValidateIntMax_{{.StructType}}.{{.FieldName}}
+	if !params.{{.FieldName}} <= {{.RestrMax.Value}} {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be <= {{.RestrMax.Value}}\"}")
 		return
 	}
 `))
 
 	serveHttpTpl = template.Must(template.New("serveHttpTpl").Parse(`
-func (h {{.agMRecvType}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h {{.AGMRecvType}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	{{range .agMRecvFuncs}}case "{{.agData.Url}}":
-		wrapper{{.agFuncName}}(w, r)
+	{{range .AGMRecvFuncs}}case "{{.AGMetaData.Url}}":
+		wrapper{{.AGFName}}(w, r)
 	{{end}}
 	default:
 		w.WriteHeader(http.StatusNotFound) //404
 		fmt.Fprintln(w, "{\"error\":\"unknown method\"}")
 	}
+}
 `))
 
 	theTplStructs1 tplStructs1
@@ -254,8 +305,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	//out, _ := os.Create(os.Args[2]) //TODO UNCOMMENT DEBUG
-	out := os.Stdout //TODO REMOVE DEBUG
+	out, _ := os.Create(os.Args[2]) //TODO UNCOMMENT DEBUG
+	//out := os.Stdout //TODO REMOVE DEBUG
 
 	fmt.Fprintln(out, `package `+node.Name.Name)
 	fmt.Fprintln(out) // empty line
@@ -344,16 +395,16 @@ ROOT_NODE_DECLS:
 			// ADD method data to tmp_map[RecvStructType] ======================
 			if _, ok := theTplStructs2[agMRecvType]; !ok { //init map element of type tpl2
 				theTplStructs2[agMRecvType] = &tplStruct2{
-					agMRecvType:  agMRecvType, //struct_field: local_var
-					agMRecvFuncs: make([]funcData, 0, 1),
+					AGMRecvType:  agMRecvType, //struct_field: local_var
+					AGMRecvFuncs: make([]FuncData, 0, 1),
 				}
 			}
-			theTplStructs2[agMRecvType].appendFunc(funcData{
-				agMRecvType:   agMRecvType,
-				agFName:       agFName,
-				agParamsType:  agParamsType,
-				agMResultType: agMResultType,
-				agMetaData:    agFuncData,
+			theTplStructs2[agMRecvType].appendFunc(FuncData{
+				AGMRecvType:   agMRecvType,
+				AGFName:       agFName,
+				AGParamsType:  agParamsType,
+				AGMResultType: agMResultType,
+				AGMetaData:    agFuncData,
 			})
 			fmt.Printf("+++ %#v\n", theTplStructs2[agMRecvType])
 
@@ -382,23 +433,24 @@ ROOT_NODE_DECLS:
 				agFMeta := ApiValidatorMeta{}
 				agFMeta.ParseAVMetaTags(agFMetaTags)
 				for _, n := range f.Names {
-					fmt.Printf("=== %v\n", n.Name) //++ paramName
+					fmt.Printf("=== %v\n", n.Name)
+					agFieldName := n.Name //++ FieldName //paramName
 					if _, ok := theTplStructs1[agParamsType]; !ok {
 						theTplStructs1[agParamsType] = make([]tplStruct1, 0) //init
 					}
 					if agFMeta.ParamName == nil { //JsonName
-						agFMeta.ParamName = &AVParamName{strings.ToLower(agFName)}
+						agFMeta.ParamName = &AVParamName{strings.ToLower(agFieldName)}
 					}
 					theTplStructs1[agParamsType] = append(theTplStructs1[agParamsType], tplStruct1{
 						StructType:       agParamsType,
-						FieldName:        agFName,
+						FieldName:        agFieldName,
 						FieldType:        agFType,
 						ApiValidatorMeta: agFMeta,
 					})
 				}
 			}
-			fmt.Printf("##### %#v\n", theTplStructs1[agParamsType])
-			fmt.Println(theTplStructs1) //TODO REMOVE DEBUG
+			//fmt.Printf("##### %#v\n", theTplStructs1[agParamsType])
+			//fmt.Println(theTplStructs1) //TODO REMOVE DEBUG
 			//os.Exit(0)
 			//##################################################################
 
@@ -411,4 +463,93 @@ ROOT_NODE_DECLS:
 	//==========================================================================
 	// Generating output =======================================================
 	//TODO ...
+	fmt.Println("-------------------------------------------------------------")
+	fmt.Println("-------------------------------------------------------------")
+	for k, v := range theTplStructs1 {
+		fmt.Println(k, "\n", v, "\n")
+	}
+	fmt.Println("-------------------------------------------------------------")
+	fmt.Println("-------------------------------------------------------------")
+
+	for key, api := range theTplStructs2 {
+		fmt.Println(key, "\n", api, "\n")
+
+		// func (h *SomeApi) serveHttp(...)
+		serveHttpTpl.Execute(out, *api)
+
+		// func (h *SomeApi) wrapperSomeAction(...)
+		for _, ps := range api.AGMRecvFuncs {
+			fmt.Fprintf(out, "\nfunc(h %s) wrapper%s(w http.ResponceWriter, r *http.Request) {\n", ps.AGMRecvType, ps.AGFName)
+			fmt.Fprintf(out, "\tparams := %s{}\n", ps.AGParamsType)
+
+			// params fill,
+			//TODO params validate
+			for _, p := range theTplStructs1[ps.AGParamsType] {
+				//fmt.Printf("== %#v", p)
+				switch p.FieldType {
+				case "int":
+					intFillTpl.Execute(out, p)          //fill
+					p.generateIntParamValidateCode(out) //validate
+				case "string":
+					strFillTpl.Execute(out, p)          //fill
+					p.generateStrParamValidateCode(out) //validate
+				}
+			}
+
+			fmt.Fprintf(out, `
+	// The rest
+	ctx := r.Context()
+	res, err := h.Create(ctx, params)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintln(w, "{\"error\":\""+err.Error()+"\"}")
+	} else {
+		jsonRes, err := json.Marshal(res)
+		if err != nil {
+			fmt.Println("### WTF? InternalServerError? ###")
+		}
+		fmt.Fprintln(w, "{\"error\":\"\",\"response\":"+string(jsonRes)+"\"}")
+	}
+`)
+			fmt.Fprintln(out, "}\n")
+
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+//TODO avIntRequiredTpl, avIntEnumTpl, avIntDefaultTpl, avStrDefaultTpl
+
+func (p tplStruct1) generateIntParamValidateCode(w io.Writer) {
+	//TODO ? if p.Required != (*AVRequired)(nil)
+	if p.Required != nil && p.Required.Value { //TODO no need in "&& p.Required.Value" ???
+		avIntRequiredTpl.Execute(w, p)
+	}
+	if p.RestrEnum != nil {
+		avIntEnumTpl.Execute(w, p)
+	}
+	if p.RestrDefault != nil {
+		avIntDefaultTpl.Execute(w, p)
+	}
+	if p.RestrMin != nil {
+		avIntMinTpl.Execute(w, p)
+	}
+	if p.RestrMax != nil {
+		avIntMaxTpl.Execute(w, p)
+	}
+}
+
+func (p tplStruct1) generateStrParamValidateCode(w io.Writer) {
+	if p.Required != nil && p.Required.Value { //TODO no need in "&& p.Required.Value" ???
+		avStrRequiredTpl.Execute(w, p)
+	}
+	if p.RestrEnum != nil {
+		avStrEnumTpl.Execute(w, p)
+	}
+	if p.RestrDefault != nil {
+		avStrDefaultTpl.Execute(w, p)
+	}
+	if p.RestrMin != nil {
+		avStrMinLenTpl.Execute(w, p)
+	}
 }
