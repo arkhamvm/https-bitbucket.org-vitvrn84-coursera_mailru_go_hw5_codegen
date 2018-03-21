@@ -251,7 +251,7 @@ var (
 	//=== Restrictions: min ===
 	avStrMinLenTpl = template.Must(template.New("avStrMinLenTpl").Parse(`
 	// paramsValidateStrMinLen_{{.StructType}}.{{.FieldName}}
-	if !len(params.{{.FieldName}}) >= {{.RestrMin.Value}} {
+	if !(len(params.{{.FieldName}}) >= {{.RestrMin.Value}}) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} len must be >= {{.RestrMin.Value}}\"}")
 		return
@@ -259,7 +259,7 @@ var (
 `))
 	avIntMinTpl = template.Must(template.New("avIntMinTpl").Parse(`
 	// paramsValidateIntMin_{{.StructType}}.{{.FieldName}}
-	if !params.{{.FieldName}} >= {{.RestrMin.Value}} {
+	if !(params.{{.FieldName}} >= {{.RestrMin.Value}}) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be >= {{.RestrMin.Value}}\"}")
 		return
@@ -268,7 +268,7 @@ var (
 	//=== Restrictions: max ===
 	avIntMaxTpl = template.Must(template.New("avIntMaxTpl").Parse(`
 	// paramsValidateIntMax_{{.StructType}}.{{.FieldName}}
-	if !params.{{.FieldName}} <= {{.RestrMax.Value}} {
+	if !(params.{{.FieldName}} <= {{.RestrMax.Value}}) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintln(w, "{\"error\":\"{{.ParamName.Value}} must be <= {{.RestrMax.Value}}\"}")
 		return
@@ -279,7 +279,7 @@ var (
 func (h {{.AGMRecvType}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	{{range .AGMRecvFuncs}}case "{{.AGMetaData.Url}}":
-		wrapper{{.AGFName}}(w, r)
+		h.wrapper{{.AGFName}}(w, r)
 	{{end}}
 	default:
 		w.WriteHeader(http.StatusNotFound) //404
@@ -479,7 +479,7 @@ ROOT_NODE_DECLS:
 
 		// func (h *SomeApi) wrapperSomeAction(...)
 		for _, ps := range api.AGMRecvFuncs {
-			fmt.Fprintf(out, "\nfunc(h %s) wrapper%s(w http.ResponceWriter, r *http.Request) {\n", ps.AGMRecvType, ps.AGFName)
+			fmt.Fprintf(out, "\nfunc(h %s) wrapper%s(w http.ResponseWriter, r *http.Request) {\n", ps.AGMRecvType, ps.AGFName)
 			fmt.Fprintf(out, "\tparams := %s{}\n", ps.AGParamsType)
 
 			// params fill,
@@ -496,10 +496,10 @@ ROOT_NODE_DECLS:
 				}
 			}
 
-			fmt.Fprintf(out, `
-	// The rest
-	ctx := r.Context()
-	res, err := h.Create(ctx, params)
+			fmt.Fprintln(out, "\t// The rest")
+			fmt.Fprintln(out, "\tctx := r.Context()")
+			fmt.Fprintf(out, "res, err := h.%s(ctx, params)", ps.AGFName)
+			fmt.Fprintln(out, `
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintln(w, "{\"error\":\""+err.Error()+"\"}")
@@ -508,9 +508,8 @@ ROOT_NODE_DECLS:
 		if err != nil {
 			fmt.Println("### WTF? InternalServerError? ###")
 		}
-		fmt.Fprintln(w, "{\"error\":\"\",\"response\":"+string(jsonRes)+"\"}")
-	}
-`)
+		fmt.Fprintln(w, "{\"error\":\"\",\"response\":"+string(jsonRes)+"}")
+	}`)
 			fmt.Fprintln(out, "}\n")
 
 		}
