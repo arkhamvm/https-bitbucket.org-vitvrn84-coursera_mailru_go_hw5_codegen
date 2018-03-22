@@ -319,6 +319,11 @@ func runTests(t *testing.T, ts *httptest.Server, cases []Case) {
 		// fmt.Printf("[%s] body: %s\n", caseName, string(body))
 
 		if resp.StatusCode != item.Status {
+			//TODO REMOVE DEBUG
+			json.Unmarshal(body, &result)
+			fmt.Println(result)
+			//TODO
+
 			t.Errorf("[%s] expected http status %v, got %v", caseName, item.Status, resp.StatusCode)
 			continue
 		}

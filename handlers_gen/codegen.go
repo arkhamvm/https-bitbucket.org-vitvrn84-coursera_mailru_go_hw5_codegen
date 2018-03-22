@@ -6,19 +6,16 @@ package main
 // например, тип структуры:
 // map[StructType]struct{StructType...}
 
-//TODO DefaultStr, DefaultInt:
-// пока используются только в Enum_restriction
-
 import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"log"
-	"os"
-	//	"reflect" //for reflect.StructTag
 	"io"
+	"log"
+	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,8 +38,6 @@ type (
 		Method string `json:"method"`
 	}
 
-	//TODO ??? RestrictionEnumInt, RestrictionDefaultInt
-
 	AVRequired struct {
 		Value bool
 	}
@@ -61,9 +56,6 @@ type (
 	AVRestrictionDefault struct {
 		Value string
 	}
-	//	AVRestrictionLenStr struct {
-	//		Value int
-	//	}
 
 	// Data from `apivalidator:...` meta tag
 	// At this point it's no matter of which type param is
@@ -147,10 +139,6 @@ func (m *ApiValidatorMeta) ParseAVMetaTags(s string) {
 		m.RestrDefault = &AVRestrictionDefault{def}
 	}
 }
-
-//func (s *tplStruct1) set(ss tplStruct1) {
-//	s = ss
-//}
 
 func (s *tplStruct2) appendFunc(fd FuncData) {
 	s.AGMRecvFuncs = append(s.AGMRecvFuncs, fd)
@@ -482,26 +470,57 @@ ROOT_NODE_DECLS:
 			fmt.Fprintf(out, "\nfunc(h %s) wrapper%s(w http.ResponseWriter, r *http.Request) {\n", ps.AGMRecvType, ps.AGFName)
 			fmt.Fprintf(out, "\tparams := %s{}\n", ps.AGParamsType)
 
+			// check HTTP method:
+			//TODO
+			fmt.Println("========", ps.AGMetaData.Method)
+			switch ps.AGMetaData.Method {
+			case http.MethodPost, http.MethodGet:
+				fmt.Fprintf(out, `
+	if r.Method != "%s" {
+		w.WriteHeader(http.StatusNotAcceptable)
+		fmt.Fprintln(w, "{\"error\":\"bad method\"}")
+		return 
+	}
+`, ps.AGMetaData.Method)
+			}
+
+			// check auth:
+			//TODO
+			fmt.Println("========", ps.AGMetaData.Auth)
+			if ps.AGMetaData.Auth {
+				fmt.Fprintln(out, `
+	if r.Header.Get("X-Auth") != "100500" {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintln(w, "{\"error\":\"unauthorized\"}")
+		return
+	}`)
+			}
+
 			// params fill,
 			//TODO params validate
 			for _, p := range theTplStructs1[ps.AGParamsType] {
 				//fmt.Printf("== %#v", p)
 				switch p.FieldType {
 				case "int":
-					intFillTpl.Execute(out, p)          //fill
-					p.generateIntParamValidateCode(out) //validate
+					intFillTpl.Execute(out, p)          // fill
+					p.generateIntParamValidateCode(out) // validate
 				case "string":
-					strFillTpl.Execute(out, p)          //fill
+					strFillTpl.Execute(out, p)          // fill
 					p.generateStrParamValidateCode(out) //validate
 				}
 			}
 
 			fmt.Fprintln(out, "\t// The rest")
 			fmt.Fprintln(out, "\tctx := r.Context()")
-			fmt.Fprintf(out, "res, err := h.%s(ctx, params)", ps.AGFName)
+			fmt.Fprintf(out, "\tres, err := h.%s(ctx, params)", ps.AGFName)
 			fmt.Fprintln(out, `
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		apiErr, ok := err.(ApiError)
+		if ok {
+			w.WriteHeader(apiErr.HTTPStatus)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}		
 		fmt.Fprintln(w, "{\"error\":\""+err.Error()+"\"}")
 	} else {
 		jsonRes, err := json.Marshal(res)
@@ -517,18 +536,17 @@ ROOT_NODE_DECLS:
 	}
 }
 
-//TODO avIntRequiredTpl, avIntEnumTpl, avIntDefaultTpl, avStrDefaultTpl
-
 func (p tplStruct1) generateIntParamValidateCode(w io.Writer) {
-	//TODO ? if p.Required != (*AVRequired)(nil)
+	//TODO ? && p.Required != (*AVRequired)(nil)
 	if p.Required != nil && p.Required.Value { //TODO no need in "&& p.Required.Value" ???
 		avIntRequiredTpl.Execute(w, p)
 	}
-	if p.RestrEnum != nil {
-		avIntEnumTpl.Execute(w, p)
-	}
+	// RestrDefault before RestrEnum to set default value before check
 	if p.RestrDefault != nil {
 		avIntDefaultTpl.Execute(w, p)
+	}
+	if p.RestrEnum != nil {
+		avIntEnumTpl.Execute(w, p)
 	}
 	if p.RestrMin != nil {
 		avIntMinTpl.Execute(w, p)
@@ -542,11 +560,12 @@ func (p tplStruct1) generateStrParamValidateCode(w io.Writer) {
 	if p.Required != nil && p.Required.Value { //TODO no need in "&& p.Required.Value" ???
 		avStrRequiredTpl.Execute(w, p)
 	}
-	if p.RestrEnum != nil {
-		avStrEnumTpl.Execute(w, p)
-	}
+	// RestrDefault before RestrEnum to set default value before check
 	if p.RestrDefault != nil {
 		avStrDefaultTpl.Execute(w, p)
+	}
+	if p.RestrEnum != nil {
+		avStrEnumTpl.Execute(w, p)
 	}
 	if p.RestrMin != nil {
 		avStrMinLenTpl.Execute(w, p)
